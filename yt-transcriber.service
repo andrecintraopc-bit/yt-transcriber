@@ -1,0 +1,16 @@
+[Unit]
+Description=yt-transcriber web app
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/yt-transcriber
+ExecStart=/usr/bin/python3 /opt/yt-transcriber/app.py
+Restart=on-failure
+RestartSec=5
+Environment=YT_OUTPUT_DIR=/opt/yt-transcriber/output
+Environment=YT_TEMP_DIR=/tmp/yt_transcriber
+
+[Install]
+WantedBy=multi-user.target
