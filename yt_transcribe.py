@@ -87,14 +87,23 @@ def get_video_info(url: str) -> dict:
     if result.returncode != 0:
         raise RuntimeError(f"yt-dlp info falhou: {result.stderr[:200]}")
     data = json.loads(result.stdout)
+    video_id = data.get("id", "")
     return {
         "title": data.get("title", "Sem titulo"),
         "channel": data.get("channel", data.get("uploader", "Desconhecido")),
         "duration": data.get("duration", 0),
         "upload_date": data.get("upload_date", ""),
         "url": url.strip(),
-        "video_id": data.get("id", ""),
+        "video_id": video_id,
+        "thumbnail": f"https://img.youtube.com/vi/{video_id}/mqdefault.jpg" if video_id else "",
+        "chapters": data.get("chapters", []),
     }
+
+
+def reading_time_minutes(text: str) -> int:
+    """Estima tempo de leitura em minutos (250 palavras/min)."""
+    words = len(text.split())
+    return max(1, round(words / 250))
 
 
 # ---------------------------------------------------------------------------
@@ -204,15 +213,21 @@ def download_audio(url: str, output_dir: Path = None) -> Path:
 # Transcricao + Resumo (Claude Haiku via MAX CLI, R$0)
 # ---------------------------------------------------------------------------
 
-def transcribe_audio(audio_path: Path, model: str = "small", language: str = "pt") -> dict:
+def transcribe_audio(audio_path: Path, model: str = "small", language: str | None = "pt") -> dict:
     whisper = _get_model(model, device="cpu", compute_type="int8")
+    # language=None → Whisper auto-detects; "auto" treated as None
+    lang_arg = None if language in (None, "auto") else language
     segments_raw, info = whisper.transcribe(
         str(audio_path),
-        language=language,
+        language=lang_arg,
         word_timestamps=True,
         vad_filter=False,
     )
-    return _normalize_transcript(list(segments_raw), info, audio_path)
+    result = _normalize_transcript(list(segments_raw), info, audio_path)
+    if lang_arg is None:
+        result["detected_language"] = info.language
+        log.info(f"  Idioma detectado: {info.language}")
+    return result
 
 
 def _haiku(prompt: str, timeout: int = 90) -> str:
@@ -229,9 +244,17 @@ def _haiku(prompt: str, timeout: int = 90) -> str:
 
 def generate_summary(text: str, lang: str = "pt") -> str:
     if lang == "en":
-        prompt = f"Summarize this transcript in 3-5 sentences, capturing the key points:\n\n{text[:8000]}"
+        prompt = (
+            "Summarize this transcript as 4-6 numbered key points (one per line). "
+            "Each point: concise, actionable, max 20 words. No intro text.\n\n"
+            f"Transcript:\n{text[:8000]}"
+        )
     else:
-        prompt = f"Resuma esta transcricao em 3-5 frases, capturando os pontos principais:\n\n{text[:8000]}"
+        prompt = (
+            "Resuma esta transcricao em 4-6 pontos numerados (um por linha). "
+            "Cada ponto: conciso, direto, max 20 palavras. Sem texto de introducao.\n\n"
+            f"Transcricao:\n{text[:8000]}"
+        )
     return _haiku(prompt) or "(Resumo indisponivel)"
 
 
@@ -437,10 +460,14 @@ def format_markdown(results: list, timestamps: bool = False,
         engine = r["transcript"].get("engine", "faster-whisper")
         engine_badge = " *(legendas YT)*" if engine == "youtube-subtitles" else ""
 
+        read_min = reading_time_minutes(r["transcript"].get("text", ""))
+        detected_lang = r["transcript"].get("detected_language", "")
+        lang_note = f" · idioma: {detected_lang}" if detected_lang else ""
         lines.append(f"## {idx}. {info['title']}{engine_badge}")
         lines.append(
             f"**Canal:** {info['channel']} | "
             f"**Duracao:** {_fmt_dur(info['duration'])} | "
+            f"**Leitura:** ~{read_min}min{lang_note} | "
             f"**Data:** {_fmt_date(info.get('upload_date', ''))}"
         )
         lines.append(f"**Link:** {info['url']}\n")
@@ -496,6 +523,7 @@ def format_markdown(results: list, timestamps: bool = False,
 # ---------------------------------------------------------------------------
 
 def process_urls(urls: list, quality: str = "low", lang: str = "pt",
+                 audio_lang: str | None = "pt",
                  timestamps: bool = False, output_name: str = None,
                  on_progress: callable = None,
                  study: bool = False, speakers: bool = False,
@@ -527,7 +555,7 @@ def process_urls(urls: list, quality: str = "low", lang: str = "pt",
                 log.info(f"  Audio: {audio_path.name}")
                 if on_progress:
                     on_progress(i, len(urls), "transcribing", url)
-                transcript = transcribe_audio(audio_path, model=model, language="pt")
+                transcript = transcribe_audio(audio_path, model=model, language=audio_lang)
                 log.info(f"  Transcrito: {len(transcript['segments'])} segmentos")
 
                 if speakers:
@@ -609,6 +637,8 @@ def process_urls(urls: list, quality: str = "low", lang: str = "pt",
                 "study_notes": r.get("study_notes", ""),
                 "reel_candidates": r.get("reel_candidates", []),
                 "transcript": r["transcript"],
+                "reading_time_minutes": reading_time_minutes(r["transcript"].get("text", "")),
+                "detected_language": r["transcript"].get("detected_language", ""),
             }
             for r in results
         ],

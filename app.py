@@ -23,8 +23,10 @@ from pydantic import BaseModel
 sys.path.insert(0, str(Path(__file__).parent))
 from yt_transcribe import (
     process_urls, validate_url, expand_playlist, is_playlist_url,
-    format_srt, OUTPUT_DIR, _haiku,
+    format_srt, OUTPUT_DIR, _haiku, YT_DLP,
 )
+
+COOKIES_PATH = OUTPUT_DIR / "cookies.txt"
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("yt_transcriber.app")
@@ -215,6 +217,14 @@ UI_HTML = """<!DOCTYPE html>
         <option value="en">English</option>
       </select>
     </div>
+    <div>
+      <label style="margin-bottom:4px">Áudio</label>
+      <select id="audio-lang">
+        <option value="pt">PT (forçar)</option>
+        <option value="auto">Auto-detect</option>
+        <option value="en">EN (forçar)</option>
+      </select>
+    </div>
   </div>
 
   <div class="row">
@@ -228,7 +238,13 @@ UI_HTML = """<!DOCTYPE html>
 </div>
 
 <div class="card" id="result">
-  <h2>Resultado <span class="pill pill-ok" id="engine-badge"></span></h2>
+  <div style="display:flex; gap:12px; align-items:flex-start; margin-bottom:12px">
+    <img id="thumb" src="" alt="" style="width:100px; border-radius:6px; display:none; flex-shrink:0">
+    <div style="flex:1">
+      <h2 style="margin-bottom:4px">Resultado <span class="pill pill-ok" id="engine-badge"></span></h2>
+      <div id="result-meta" style="font-size:0.75rem; color:#666; margin-top:2px"></div>
+    </div>
+  </div>
   <div id="md-out"></div>
 
   <div class="row" style="margin-top:10px">
@@ -305,6 +321,7 @@ async function submit() {
         urls: [url],
         quality: document.getElementById('quality').value,
         lang: document.getElementById('lang').value,
+        audio_lang: document.getElementById('audio-lang').value,
         timestamps: document.getElementById('timestamps').checked,
         study: document.getElementById('study').checked,
         reels: document.getElementById('reels').checked,
@@ -352,6 +369,23 @@ async function fetchResult() {
   const engine = currentMd.includes('legendas YT') ? 'legendas YT' : 'Whisper';
   document.getElementById('engine-badge').textContent = engine;
   document.getElementById('md-out').textContent = currentMd;
+
+  // Show thumbnail and metadata from first result
+  const results = data.results || [];
+  if (results.length > 0) {
+    const r = results[0];
+    const thumb = r.info?.thumbnail;
+    if (thumb) {
+      const img = document.getElementById('thumb');
+      img.src = thumb;
+      img.style.display = 'block';
+    }
+    const meta = [];
+    if (r.reading_time_minutes) meta.push(`~${r.reading_time_minutes}min leitura`);
+    if (r.detected_language) meta.push(`idioma detectado: ${r.detected_language}`);
+    if (results.length > 1) meta.push(`${results.length} vídeos`);
+    document.getElementById('result-meta').textContent = meta.join(' · ');
+  }
 
   const base = '/result/' + currentJobId;
   document.getElementById('dl-md').href = base + '/download';
@@ -471,6 +505,7 @@ class TranscribeRequest(BaseModel):
     urls: list[str]
     quality: str = "low"
     lang: str = "pt"
+    audio_lang: str = "pt"  # whisper language; "auto" = auto-detect
     timestamps: bool = False
     study: bool = False
     speakers: bool = False
@@ -521,8 +556,10 @@ def _run_job(job_id: str, req: TranscribeRequest, urls: list[str]):
                 expanded.append(u)
         jobs[job_id]["total"] = len(expanded)
 
+        audio_lang = None if req.audio_lang == "auto" else req.audio_lang
         output_path = process_urls(
             expanded, quality=req.quality, lang=req.lang,
+            audio_lang=audio_lang,
             timestamps=req.timestamps, on_progress=on_progress,
             study=req.study, speakers=req.speakers, reels=req.reels,
         )
@@ -593,10 +630,21 @@ def result(job_id: str):
     md_path = Path(j["file_path"])
     if not md_path.exists():
         raise HTTPException(500, "Arquivo nao encontrado")
+    results_json = j.get("results_json", {})
+    # Strip heavy segment data from API response to keep payload small
+    slim_results = []
+    for r in results_json.get("results", []):
+        slim_results.append({
+            "info": r.get("info", {}),
+            "summary": r.get("summary", ""),
+            "reading_time_minutes": r.get("reading_time_minutes", 0),
+            "detected_language": r.get("detected_language", ""),
+        })
     return {
         "markdown": md_path.read_text(encoding="utf-8"),
         "file_path": j["file_path"],
         "has_segments": j.get("has_segments", False),
+        "results": slim_results,
     }
 
 
@@ -732,6 +780,30 @@ def clip(job_id: str, req: ClipRequest):
 @app.get("/history")
 def history(q: str = ""):
     return _get_history(q)
+
+
+@app.post("/cookies/upload")
+async def upload_cookies(request):
+    """Recebe conteúdo de cookies.txt (Netscape format) e salva no VPS."""
+    from fastapi import Request
+    body = await request.body()
+    if not body:
+        raise HTTPException(400, "Corpo vazio")
+    COOKIES_PATH.parent.mkdir(parents=True, exist_ok=True)
+    COOKIES_PATH.write_bytes(body)
+    line_count = body.count(b"\n")
+    log.info(f"Cookies atualizados: {len(body)} bytes, {line_count} linhas")
+    return {"ok": True, "bytes": len(body), "lines": line_count}
+
+
+@app.get("/cookies/status")
+def cookies_status():
+    exists = COOKIES_PATH.exists()
+    if exists:
+        stat = COOKIES_PATH.stat()
+        age_hours = (datetime.now().timestamp() - stat.st_mtime) / 3600
+        return {"exists": True, "age_hours": round(age_hours, 1), "size_kb": round(stat.st_size / 1024, 1)}
+    return {"exists": False}
 
 
 if __name__ == "__main__":
