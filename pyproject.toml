@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "yt-transcriber"
+version = "1.0.0"
+description = "Transcreve videos do YouTube com faster-whisper e gera Markdown"
+requires-python = ">=3.11"
+dependencies = [
+    "faster-whisper>=1.0.0",
+    "yt-dlp>=2024.1.0",
+]
+
+[project.optional-dependencies]
+speakers = [
+    "pyannote.audio>=3.1",
+    "torch>=2.0",
+    "torchaudio>=2.0",
+]
+
+[project.scripts]
+yt-transcribe = "yt_transcribe:__main__"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["yt_transcribe*", "transcriber_fast*"]
