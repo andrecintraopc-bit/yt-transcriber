@@ -59,8 +59,26 @@ def validate_url(url: str) -> bool:
         r'(https?://)?(www\.)?youtube\.com/watch\?v=[\w-]+',
         r'(https?://)?youtu\.be/[\w-]+',
         r'(https?://)?(www\.)?youtube\.com/shorts/[\w-]+',
+        r'(https?://)?(www\.)?youtube\.com/playlist\?list=[\w-]+',
     ]
     return any(re.match(p, url.strip()) for p in patterns)
+
+
+def is_playlist_url(url: str) -> bool:
+    return bool(re.search(r'youtube\.com/playlist\?list=', url.strip()))
+
+
+def expand_playlist(url: str) -> list[str]:
+    """Expande uma playlist para lista de URLs individuais via yt-dlp."""
+    cmd = [str(YT_DLP), "--flat-playlist", "--print", "url", "--no-warnings", url.strip()]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        urls = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        log.info(f"Playlist expandida: {len(urls)} videos")
+        return urls if urls else [url]
+    except Exception as e:
+        log.warning(f"Expansao de playlist falhou: {e}")
+        return [url]
 
 
 def get_video_info(url: str) -> dict:
@@ -384,6 +402,24 @@ def _fmt_ts(seconds: float) -> str:
     return f"[{h:02d}:{m:02d}:{s:02d}]"
 
 
+def _srt_ts(seconds: float) -> str:
+    ms = int(round((seconds % 1) * 1000))
+    s = int(seconds) % 60
+    m = int(seconds) // 60 % 60
+    h = int(seconds) // 3600
+    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+
+def format_srt(segments: list) -> str:
+    lines = []
+    for i, seg in enumerate(segments, 1):
+        lines.append(str(i))
+        lines.append(f"{_srt_ts(seg['start'])} --> {_srt_ts(seg['end'])}")
+        lines.append(seg["text"].strip())
+        lines.append("")
+    return "\n".join(lines)
+
+
 def _fmt_date(date_str: str) -> str:
     if len(date_str) == 8:
         return f"{date_str[6:8]}/{date_str[4:6]}/{date_str[:4]}"
@@ -561,6 +597,24 @@ def process_urls(urls: list, quality: str = "low", lang: str = "pt",
     output_path = OUTPUT_DIR / filename
     output_path.write_text(md, encoding="utf-8")
     log.info(f"Markdown salvo: {output_path}")
+
+    # Salva JSON estruturado (segmentos + metadados) para chat, clipping e SRT
+    json_path = output_path.with_suffix(".json")
+    json_data = {
+        "created_at": datetime.now().isoformat(),
+        "results": [
+            {
+                "info": r["info"],
+                "summary": r.get("summary", ""),
+                "study_notes": r.get("study_notes", ""),
+                "reel_candidates": r.get("reel_candidates", []),
+                "transcript": r["transcript"],
+            }
+            for r in results
+        ],
+    }
+    json_path.write_text(json.dumps(json_data, ensure_ascii=False, indent=2), encoding="utf-8")
+    log.info(f"JSON salvo: {json_path}")
 
     if on_progress:
         on_progress(len(urls), len(urls), "done", str(output_path))
