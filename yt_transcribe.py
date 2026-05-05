@@ -48,6 +48,7 @@ TEMP_DIR = Path(os.environ.get("YT_TEMP_DIR", str(Path(tempfile.gettempdir()) / 
 
 sys.path.insert(0, str(Path(__file__).parent))
 from transcriber_fast import _get_model, _normalize_transcript
+from db import init_db, save_history
 
 
 # ---------------------------------------------------------------------------
@@ -527,9 +528,10 @@ def process_urls(urls: list, quality: str = "low", lang: str = "pt",
                  timestamps: bool = False, output_name: str = None,
                  on_progress: callable = None,
                  study: bool = False, speakers: bool = False,
-                 reels: bool = False) -> Path:
+                 reels: bool = False, job_id: str | None = None) -> Path:
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     TEMP_DIR.mkdir(parents=True, exist_ok=True)
+    init_db()
 
     model = "medium" if quality == "high" else "small"
     results = []
@@ -645,6 +647,12 @@ def process_urls(urls: list, quality: str = "low", lang: str = "pt",
     }
     json_path.write_text(json.dumps(json_data, ensure_ascii=False, indent=2), encoding="utf-8")
     log.info(f"JSON salvo: {json_path}")
+
+    if not job_id:
+        import uuid
+        job_id = str(uuid.uuid4())
+    n_inserted = save_history(job_id, json_data, str(output_path))
+    log.info(f"DB: {n_inserted} linha(s) inserida(s) em history (job_id={job_id[:8]})")
 
     if on_progress:
         on_progress(len(urls), len(urls), "done", str(output_path))

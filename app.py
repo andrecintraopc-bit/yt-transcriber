@@ -25,6 +25,7 @@ from yt_transcribe import (
     process_urls, validate_url, expand_playlist, is_playlist_url,
     format_srt, OUTPUT_DIR, _haiku, YT_DLP,
 )
+from db import init_db, save_history, get_history, DB_PATH
 
 COOKIES_PATH = OUTPUT_DIR / "cookies.txt"
 
@@ -40,71 +41,7 @@ jobs: dict = {}
 # SQLite — Histórico
 # ---------------------------------------------------------------------------
 
-DB_PATH = OUTPUT_DIR / "history.db"
-
-
-def _init_db():
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    con = sqlite3.connect(str(DB_PATH))
-    con.execute("""
-        CREATE TABLE IF NOT EXISTS history (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            job_id TEXT,
-            created_at TEXT,
-            title TEXT,
-            channel TEXT,
-            url TEXT,
-            summary TEXT,
-            md_path TEXT
-        )
-    """)
-    con.commit()
-    con.close()
-
-
-def _save_history(job_id: str, results_json: dict, md_path: str):
-    try:
-        con = sqlite3.connect(str(DB_PATH))
-        for r in results_json.get("results", []):
-            info = r.get("info", {})
-            con.execute(
-                "INSERT INTO history (job_id, created_at, title, channel, url, summary, md_path) VALUES (?,?,?,?,?,?,?)",
-                (
-                    job_id,
-                    datetime.now().isoformat(),
-                    info.get("title", ""),
-                    info.get("channel", ""),
-                    info.get("url", ""),
-                    r.get("summary", "")[:300],
-                    md_path,
-                ),
-            )
-        con.commit()
-        con.close()
-    except Exception as e:
-        log.warning(f"Falha ao salvar histórico: {e}")
-
-
-def _get_history(q: str = "") -> list:
-    try:
-        con = sqlite3.connect(str(DB_PATH))
-        con.row_factory = sqlite3.Row
-        if q:
-            rows = con.execute(
-                "SELECT * FROM history WHERE title LIKE ? OR summary LIKE ? ORDER BY created_at DESC LIMIT 50",
-                (f"%{q}%", f"%{q}%"),
-            ).fetchall()
-        else:
-            rows = con.execute(
-                "SELECT * FROM history ORDER BY created_at DESC LIMIT 50"
-            ).fetchall()
-        con.close()
-        return [dict(r) for r in rows]
-    except Exception:
-        return []
-
-
-_init_db()
+init_db()
 
 # ---------------------------------------------------------------------------
 # HTML UI
@@ -562,9 +499,10 @@ def _run_job(job_id: str, req: TranscribeRequest, urls: list[str]):
             audio_lang=audio_lang,
             timestamps=req.timestamps, on_progress=on_progress,
             study=req.study, speakers=req.speakers, reels=req.reels,
+            job_id=job_id,
         )
 
-        # Load JSON for history + job state
+        # Load JSON for job state (history já foi salvo dentro de process_urls)
         json_path = output_path.with_suffix(".json")
         results_json = {}
         has_segments = False
@@ -574,7 +512,6 @@ def _run_job(job_id: str, req: TranscribeRequest, urls: list[str]):
                 if r.get("transcript", {}).get("segments"):
                     has_segments = True
                     break
-            _save_history(job_id, results_json, str(output_path))
 
         jobs[job_id].update(
             status="done",
@@ -779,7 +716,7 @@ def clip(job_id: str, req: ClipRequest):
 
 @app.get("/history")
 def history(q: str = ""):
-    return _get_history(q)
+    return get_history(q)
 
 
 @app.post("/cookies/upload")
